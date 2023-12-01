@@ -882,6 +882,8 @@ static void vkd3d_config_flags_init_once(void)
     vkd3d_instance_deduce_config_flags_from_environment();
     vkd3d_instance_apply_global_shader_quirks();
 
+    vkd3d_config_flags |= VKD3D_CONFIG_FLAG_VULKAN_DEBUG;
+
     /* If we're going to use vk_debug, make sure we can get debug callbacks. */
     if (vkd3d_config_flags & VKD3D_CONFIG_FLAG_VULKAN_DEBUG)
         vkd3d_config_flags |= VKD3D_CONFIG_FLAG_DEBUG_UTILS;

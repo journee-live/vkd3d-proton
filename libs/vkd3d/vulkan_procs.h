@@ -195,6 +195,8 @@ VK_DEVICE_PFN(vkWaitForFences)
 VK_DEVICE_PFN(vkWaitSemaphores)
 VK_DEVICE_PFN(vkCmdSetDepthWriteEnable)
 
+
+
 /* VK_KHR_push_descriptor */
 VK_DEVICE_EXT_PFN(vkCmdPushDescriptorSetKHR)
 
@@ -230,6 +232,9 @@ VK_DEVICE_EXT_PFN(vkGetMemoryWin32HandlePropertiesKHR)
 VK_DEVICE_EXT_PFN(vkGetSemaphoreWin32HandleKHR)
 VK_DEVICE_EXT_PFN(vkImportSemaphoreWin32HandleKHR)
 #endif
+
+VK_DEVICE_EXT_PFN(vkGetSemaphoreFdKHR)
+VK_DEVICE_EXT_PFN(vkGetMemoryFdKHR)
 
 /* VK_EXT_calibrated_timestamps */
 VK_DEVICE_EXT_PFN(vkGetCalibratedTimestampsEXT)

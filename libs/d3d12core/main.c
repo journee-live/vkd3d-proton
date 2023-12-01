@@ -61,6 +61,7 @@ static void load_vulkan_once(void)
 {
     if (!vulkan_module)
     {
+        
 #ifdef _WIN32
         /* If possible, load winevulkan directly in order to bypass
          * issues with third-party overlays hooking the Vulkan loader */
