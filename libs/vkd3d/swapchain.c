@@ -71,11 +71,10 @@ struct present_wait_entry {
   uint64_t begin_frame_time_ns;
 };
 
-#define NUM_STREAMER_TEXTURES (4)
+#define NUM_STREAMER_TEXTURES (5)
 
 struct streamer_thread_wait_entry {
   int texture_idx;
-  int wait_for_value;
   uint64_t submit_time;
   VkFence fence;
 };
@@ -128,10 +127,9 @@ struct dxgi_vk_swap_chain {
 
     VkImage vk_streamer_textures[NUM_STREAMER_TEXTURES];
     VkImageView vk_streamer_image_views[NUM_STREAMER_TEXTURES];
-    VkSemaphore vk_streamer_semaphore[NUM_STREAMER_TEXTURES];
-    int vk_streamer_sem_values[NUM_STREAMER_TEXTURES];
-    VkFence vk_streamer_fences[NUM_STREAMER_TEXTURES];
+    VkDeviceMemory vk_streamer_memory[NUM_STREAMER_TEXTURES];
     int vk_draw_sequence;
+    struct proton_streamer_shm *shm;
 
     VkSwapchainKHR vk_swapchain;
     VkImage vk_backbuffer_images[DXGI_MAX_SWAP_CHAIN_BUFFERS];
@@ -1549,8 +1547,6 @@ AllocateStreamerShm allocate_fn = NULL;
 proton_streamer_signal_new_texture signal_new_texture = NULL;
 proton_streamer_get_output_texture get_output_texture = NULL;
 
-struct proton_streamer_shm *shm = NULL;
-
 static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(
     struct dxgi_vk_swap_chain *chain) {
   const struct vkd3d_vk_device_procs *vk_procs =
@@ -1717,6 +1713,50 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(
     VK_CALL(vkCreateCommandPool(vk_device, &command_pool_create_info, NULL,
                                 &chain->present.vk_blit_command_pool));
   }
+
+
+  for (i = 0; i < NUM_STREAMER_TEXTURES; ++i) {
+    chain->present.vk_streamer_textures[i] = create_vulkan_image(
+        chain->queue->device, chain->desc.Width, chain->desc.Height, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+
+    VkDeviceMemory mem = allocate_vulkan_image_memory(
+        chain->queue->device, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        chain->present.vk_streamer_textures[i]);
+
+    chain->present.vk_streamer_memory[i] = mem;
+
+    VkImageViewCreateInfo view_info;
+    memset(&view_info, 0, sizeof(view_info));
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.layerCount = 1;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+
+    INFO("Streamer created textureee: %i\n",
+         chain->present.vk_streamer_textures[i]);
+    INFO("Image Format: %i Our Format: %i\n", view_info.format,
+         VK_FORMAT_R8G8B8A8_UNORM);
+
+    view_info.image = chain->present.vk_streamer_textures[i];
+
+    VK_CALL(vkCreateImageView(vk_device, &view_info, NULL,
+                              &chain->present.vk_streamer_image_views[i]));
+    
+    INFO("Allocated %i\n", i);
+  }
+
+
+  HMODULE proton_streamer = LoadLibraryA("ProtonStreamer.dll.so");
+
+  allocate_fn = GetProcAddress(proton_streamer, "allocate_proton_streamer_shm");
+  signal_new_texture =
+      GetProcAddress(proton_streamer, "proton_streamer_signal_new_texture");
+  get_output_texture =
+      GetProcAddress(proton_streamer, "proton_streamer_get_output_texture");
 
   dxgi_vk_swap_chain_init_blit_pipeline(chain);
   dxgi_vk_swap_chain_set_hdr_metadata(chain);
@@ -1910,99 +1950,38 @@ dxgi_vk_swap_chain_create_streamer_texture(struct dxgi_vk_swap_chain *chain) {
   const struct vkd3d_vk_device_procs *vk_procs =
     &chain->queue->device->vk_procs;
 
-  if(shm) {
-    // We already allocated a shm section for some swapchain.
+  static bool is_shared_mem_allocated = false;
+  
+  if(is_shared_mem_allocated) {
     return;
   }
+
+  is_shared_mem_allocated = true;
   
   VkDevice vk_device = chain->queue->device->vk_device; 
   
-  HMODULE proton_streamer = LoadLibraryA("ProtonStreamer.dll.so");
-  allocate_fn = GetProcAddress(proton_streamer, "allocate_proton_streamer_shm");
-  signal_new_texture =
-      GetProcAddress(proton_streamer, "proton_streamer_signal_new_texture");
-  get_output_texture =
-      GetProcAddress(proton_streamer, "proton_streamer_get_output_texture");
 
   {
-    shm = allocate_fn();
-
-    
+    chain->present.shm = allocate_fn();
     int i;
     for (i = 0; i < NUM_STREAMER_TEXTURES; ++i) {
-      chain->present.vk_streamer_textures[i] = create_vulkan_image(
-          chain->queue->device, chain->desc.Width, chain->desc.Height, VK_FORMAT_R8G8B8A8_UNORM,
-          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-
-      VkDeviceMemory mem = allocate_vulkan_image_memory(
-          chain->queue->device, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-          chain->present.vk_streamer_textures[i]);
-
-      VkImageViewCreateInfo view_info;
-      memset(&view_info, 0, sizeof(view_info));
-      view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-      view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-      view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      view_info.subresourceRange.layerCount = 1;
-      view_info.subresourceRange.levelCount = 1;
-      view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-
-      INFO("Streamer created texture: %i\n",
-           chain->present.vk_streamer_textures[i]);
-      INFO("Image Format: %i Our Format: %i\n", view_info.format,
-           VK_FORMAT_R8G8B8A8_UNORM);
-
-      view_info.image = chain->present.vk_streamer_textures[i];
-
-      VK_CALL(vkCreateImageView(vk_device, &view_info, NULL,
-                                &chain->present.vk_streamer_image_views[i]));
-      
-
-      VkSemaphoreCreateInfo semaphore_create_info;
-      memset(&semaphore_create_info, 0, sizeof(struct VkSemaphoreCreateInfo));
-
-      struct VkSemaphoreTypeCreateInfo type_create_info;
-      type_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-      type_create_info.initialValue = 0;
-      type_create_info.pNext = NULL;
-      type_create_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-
-      semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-      semaphore_create_info.pNext = &type_create_info; //&export_sem;
-      semaphore_create_info.flags = 0;
-
-      VK_CALL(vkCreateSemaphore(vk_device, &semaphore_create_info, NULL,
-                                     &chain->present.vk_streamer_semaphore[i]));
-
-      struct VkFenceCreateInfo fence_info;
-      fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-      fence_info.pNext = NULL;
-      fence_info.flags = 0;
-
-      VK_CALL(vkCreateFence(vk_device, &fence_info, NULL,
-                            &chain->present.vk_streamer_fences[i]));
-
       VkMemoryGetFdInfoKHR get_memory_fd_info;
       get_memory_fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-      get_memory_fd_info.memory = mem;
+      get_memory_fd_info.memory = chain->present.vk_streamer_memory[i];
       get_memory_fd_info.pNext = NULL;
       get_memory_fd_info.handleType =
           VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
       VK_CALL(vkGetMemoryFdKHR(vk_device, &get_memory_fd_info,
-                               &shm->texture_fd_array[i]));
-
-      INFO("Allocated %i\n", i);
+                               &chain->present.shm->texture_fd_array[i]));
     }
-
     
-    shm->texture_width = chain->desc.Width;
-    shm->texture_height = chain->desc.Height;
+    chain->present.shm->texture_width = chain->desc.Width;
+    chain->present.shm->texture_height = chain->desc.Height;
 
     VkMemoryRequirements memory_requirements;
     VK_CALL(vkGetImageMemoryRequirements(vk_device, chain->present.vk_streamer_textures[0], &memory_requirements));
-    shm->texture_size = memory_requirements.size;
+    chain->present.shm->texture_size = memory_requirements.size;
 
     INFO("Allocated Streamer Textures\n");
   }
@@ -2161,6 +2140,8 @@ void dxgi_vk_swap_chain_streamer_worked(void *args_t) {
   vkd3d_set_thread_name("vkd3d-swapchain-streamer");
   int texture_id;
   VkFence fence;
+  VkResult vr;
+  
   for (;;) {
     pthread_mutex_lock(&chain->streamer_thread.lock);
     while (!chain->streamer_thread.wait_queue_count)
@@ -2170,10 +2151,12 @@ void dxgi_vk_swap_chain_streamer_worked(void *args_t) {
     fence = chain->streamer_thread.wait_queue[0].fence;
     pthread_mutex_unlock(&chain->streamer_thread.lock);
 
-    VK_CALL(vkWaitForFences(chain->queue->device->vk_device, 1, &fence, 1,
-                            160000000));
-
-    signal_new_texture(shm, texture_id);
+    vr = VK_CALL(vkWaitForFences(chain->queue->device->vk_device, 1, &fence,
+                                 VK_TRUE, UINT64_MAX));
+    if (vr < 0)
+      ERR("Failed to wait for fence, vr %d\n", vr);
+ 
+    signal_new_texture(chain->present.shm, texture_id);
 
     pthread_mutex_lock(&chain->streamer_thread.lock);
     chain->streamer_thread.wait_queue_count -= 1;
@@ -2271,18 +2254,21 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain,
 
   chain->present.vk_draw_sequence += 1;
 
+  if((chain->present.vk_draw_sequence % 1000) == 0) {
+    INFO("Allo: %i\n", chain->present.vk_draw_sequence );
+  }
+
   // Allocate streamer textures once we think that this swap chain is suitable.
   // Right now we only decide this based upon how many frames have been submitted to it.
-  if(chain->present.vk_draw_sequence > 60 && !chain->present.vk_streamer_textures[0]) {
-    INFO("Allocating streamer textures\n");
+  if(chain->present.vk_draw_sequence > 60 && !chain->present.shm) {
     dxgi_vk_swap_chain_create_streamer_texture(chain);
   }
 
   int streamer_tex;  
   streamer_tex = -1;
 
-  if(chain->present.vk_streamer_textures[0]) {
-    get_output_texture(shm, &streamer_tex );
+  if(chain->present.shm && chain->present.vk_streamer_textures[0]) {
+    get_output_texture(chain->present.shm , &streamer_tex );
 
     if (streamer_tex != -1) {
       dxgi_vk_swap_chain_record_render_pass_streamer(chain, vk_cmd, streamer_tex);
@@ -2352,7 +2338,6 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain,
     entry = &chain->streamer_thread
                  .wait_queue[chain->streamer_thread.wait_queue_count++];
     entry->texture_idx = streamer_tex;
-    entry->wait_for_value = chain->present.vk_streamer_sem_values[streamer_tex];
     entry->submit_time = vkd3d_get_current_time_ns();
     entry->fence = chain->present.vk_blit_fences[swapchain_index];
     pthread_cond_signal(&chain->streamer_thread.cond);
