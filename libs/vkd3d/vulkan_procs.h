@@ -43,6 +43,7 @@ VK_INSTANCE_PFN(vkGetPhysicalDeviceFeatures)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceFormatProperties)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceFormatProperties2)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties)
+VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties2)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceMemoryProperties)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceProperties)
 VK_INSTANCE_PFN(vkGetPhysicalDeviceQueueFamilyProperties)
@@ -273,6 +274,9 @@ VK_INSTANCE_EXT_PFN(vkDestroySurfaceKHR)
 VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceFormatsKHR)
 VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
 
+/* VK_KHR_get_surface_capabilities2 */
+VK_INSTANCE_EXT_PFN(vkGetPhysicalDeviceSurfaceCapabilities2KHR)
+
 /* VK_KHR_win32_surface */
 #ifdef VK_KHR_win32_surface
 VK_INSTANCE_EXT_PFN(vkCreateWin32SurfaceKHR)
@@ -346,6 +350,9 @@ VK_DEVICE_EXT_PFN(vkSetDeviceMemoryPriorityEXT)
 /* VK_NV_memory_decompression */
 VK_DEVICE_EXT_PFN(vkCmdDecompressMemoryNV)
 VK_DEVICE_EXT_PFN(vkCmdDecompressMemoryIndirectCountNV)
+
+/* VK_EXT_device_fault */
+VK_DEVICE_EXT_PFN(vkGetDeviceFaultInfoEXT)
 
 #undef VK_INSTANCE_PFN
 #undef VK_INSTANCE_EXT_PFN

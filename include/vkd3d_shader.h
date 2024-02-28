@@ -75,6 +75,7 @@ enum vkd3d_shader_meta_flags
     VKD3D_SHADER_META_FLAG_EMITS_LINES = 1 << 14,
     VKD3D_SHADER_META_FLAG_EMITS_TRIANGLES = 1 << 15,
     VKD3D_SHADER_META_FLAG_FORCE_COMPUTE_BARRIER_AFTER_DISPATCH = 1 << 16,
+    VKD3D_SHADER_META_FLAG_EXPORTS_SAMPLE_MASK = 1 << 17,
 };
 
 struct vkd3d_shader_meta
@@ -368,6 +369,8 @@ enum vkd3d_shader_target_extension
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP16_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_FP64_DENORM_PRESERVE,
     VKD3D_SHADER_TARGET_EXTENSION_SUPPORT_SUBGROUP_PARTITIONED_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_COMPUTE_SHADER_DERIVATIVES_NV,
+    VKD3D_SHADER_TARGET_EXTENSION_QUAD_CONTROL_RECONVERGENCE,
     VKD3D_SHADER_TARGET_EXTENSION_COUNT,
 };
 
@@ -1062,6 +1065,19 @@ typedef struct vkd3d_shader_signature_element * (*PFN_vkd3d_shader_find_signatur
         const struct vkd3d_shader_signature *signature, const char *semantic_name,
         unsigned int semantic_index, unsigned int stream_index);
 typedef void (*PFN_vkd3d_shader_free_shader_signature)(struct vkd3d_shader_signature *signature);
+
+int vkd3d_shader_parse_root_signature_v_1_0(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+int vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(const struct vkd3d_shader_code *dxbc,
+        struct vkd3d_versioned_root_signature_desc *out_desc,
+        vkd3d_shader_hash_t *compatibility_hash);
+
+vkd3d_shader_hash_t vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+        const struct vkd3d_root_signature_desc2 *desc);
 
 #ifdef __cplusplus
 }

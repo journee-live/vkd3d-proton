@@ -657,6 +657,15 @@ static HRESULT vkd3d_get_image_create_info(struct d3d12_device *device,
              * so it cannot be concurrently read by other queues anyways.
              * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
              * For now, keep this as a specific workaround until we understand the problem scope better. */
+
+            /* We might need BLOCK_VIEW_COMPATIBLE if application is using castable formats.
+             * It might have a detrimental effect on perf, so only do it when app requests it explicitly. */
+            if (num_castable_formats)
+            {
+                vkd3d_get_castable_format_compatibility_list(device, desc,
+                        num_castable_formats, castable_formats, compat_list, &image_info->flags);
+            }
+
             image_info->flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
             memset(compat_list, 0, sizeof(*compat_list));
             disable_compression = true;
@@ -3452,6 +3461,9 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         object->mem.chunk == NULL /* not suballocated */ &&
         (device->memory_properties.memoryTypes[object->mem.device_allocation.vk_memory_type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
+    vkd3d_queue_timeline_trace_register_instantaneous(&device->queue_timeline_trace,
+            VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_COMMITTED_RESOURCE_ALLOCATION, object->res.cookie);
+
     *resource = object;
     return S_OK;
 
@@ -4427,6 +4439,7 @@ bool vkd3d_create_texture_view(struct d3d12_device *device, const struct vkd3d_t
     VkImageViewSlicedCreateInfoEXT sliced_desc;
     VkImageView vk_view = VK_NULL_HANDLE;
     VkImageViewCreateInfo view_desc;
+    int32_t miplevel_clamp_fixed;
     struct vkd3d_view *object;
     uint32_t clamp_base_level;
     uint32_t end_level;
@@ -4447,18 +4460,21 @@ bool vkd3d_create_texture_view(struct d3d12_device *device, const struct vkd3d_t
     view_desc.subresourceRange.baseArrayLayer = desc->layer_idx;
     view_desc.subresourceRange.layerCount = desc->layer_count;
 
-    /* If we clamp out of bounds, then don't make a view
-     * and use a NULL descriptor to stay in-spec.
+    /* If the clamp is defined such that it would only access mip levels
+     * outside the view range, don't make a view and use a NULL descriptor.
      * The clamp is absolute, and not affected by the baseMipLevel. */
-    if (desc->miplevel_clamp <= (float)(desc->miplevel_idx + desc->miplevel_count - 1))
+    miplevel_clamp_fixed = vkd3d_float_to_fixed_24_8(desc->miplevel_clamp);
+
+    if (miplevel_clamp_fixed <= vkd3d_float_to_fixed_24_8(desc->miplevel_idx + desc->miplevel_count - 1))
     {
         if (desc->miplevel_clamp > (float)desc->miplevel_idx)
         {
             if (device->device_info.image_view_min_lod_features.minLod)
             {
+                /* Clamp minLod the highest accessed mip level to stay within spec */
                 min_lod_desc.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT;
                 min_lod_desc.pNext = NULL;
-                min_lod_desc.minLod = desc->miplevel_clamp;
+                min_lod_desc.minLod = vkd3d_fixed_24_8_to_float(miplevel_clamp_fixed);
                 vk_prepend_struct(&view_desc, &min_lod_desc);
             }
             else

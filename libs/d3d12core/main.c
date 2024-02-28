@@ -32,17 +32,13 @@
 #include "vkd3d_threads.h"
 #include "vkd3d_core_interface.h"
 
-/* We need to specify the __declspec(dllexport) attribute
- * on MinGW because otherwise the stdcall aliases/fixups
- * don't get exported.
- */
-#if defined(_MSC_VER)
-  #define DLLEXPORT
-#elif defined(__MINGW32__)
-  #define DLLEXPORT __declspec(dllexport)
+#include "debug.h"
+
+#if defined(__WINE__) || !defined(_WIN32)
+#define DLLEXPORT __attribute__((visibility("default")))
+#include <dlfcn.h>
 #else
-  #define DLLEXPORT __attribute__((visibility("default")))
-  #include <dlfcn.h>
+#define DLLEXPORT
 #endif
 
 typedef IVKD3DCoreInterface d3d12core_interface;
@@ -148,9 +144,10 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
     VkPhysicalDeviceProperties2 properties2;
     VkPhysicalDevice *vk_physical_devices;
     VkInstance vk_instance;
-    unsigned int i;
+    unsigned int i, j;
     uint32_t count;
     VkResult vr;
+    bool match;
 
     vk_instance = vkd3d_instance_get_vk_instance(instance);
 
@@ -198,8 +195,33 @@ static VkPhysicalDevice d3d12_find_physical_device(struct vkd3d_instance *instan
 
         if (id_properties.deviceLUIDValid && !memcmp(id_properties.deviceLUID, &adapter_desc->AdapterLuid, VK_LUID_SIZE))
         {
-            vk_physical_device = vk_physical_devices[i];
-            break;
+            match = true;
+
+            if (vk_physical_device)
+            {
+                WARN("Multiple adapters found with LUID %#x%x.\n", adapter_desc->AdapterLuid.HighPart, adapter_desc->AdapterLuid.LowPart);
+
+                match = properties2.properties.deviceID == adapter_desc->DeviceId &&
+                        properties2.properties.vendorID == adapter_desc->VendorId;
+
+                if (!match)
+                {
+                    /* For simplicity, assume that adapter names are all ASCII characters */
+                    match = true;
+
+                    for (j = 0; j < ARRAY_SIZE(adapter_desc->Description); j++)
+                    {
+                        WCHAR a = (WCHAR)properties2.properties.deviceName[j];
+                        WCHAR b = adapter_desc->Description[j];
+
+                        if (!(match = (a == b)) || !a || !b)
+                          break;
+                    }
+                }
+            }
+
+            if (match)
+                vk_physical_device = vk_physical_devices[i];
         }
     }
 
@@ -249,6 +271,12 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
 #endif
     };
 
+    static const char * const optional_instance_extensions[] =
+    {
+        VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME,
+        VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
+    };
+
     if (!load_vulkan())
     {
         ERR("Failed to load Vulkan library.\n");
@@ -259,8 +287,8 @@ static HRESULT vkd3d_create_instance_global(struct vkd3d_instance **out_instance
     instance_create_info.pfn_vkGetInstanceProcAddr = vulkan_vkGetInstanceProcAddr;
     instance_create_info.instance_extensions = instance_extensions;
     instance_create_info.instance_extension_count = ARRAY_SIZE(instance_extensions);
-    instance_create_info.optional_instance_extensions = NULL;
-    instance_create_info.optional_instance_extension_count = 0;
+    instance_create_info.optional_instance_extensions = optional_instance_extensions;
+    instance_create_info.optional_instance_extension_count = ARRAY_SIZE(optional_instance_extensions);
 
     if (FAILED(hr = vkd3d_create_instance(&instance_create_info, out_instance)))
         WARN("Failed to create vkd3d instance, hr %#x.\n", hr);
@@ -283,7 +311,11 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDevice(d3d12core_interface *cor
     static const char * const device_extensions[] =
     {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME,
+    };
+
+    static const char * const optional_device_extensions[] =
+    {
+        VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
     };
 
     TRACE("adapter %p, minimum_feature_level %#x, iid %s, device %p.\n",
@@ -313,8 +345,8 @@ static HRESULT STDMETHODCALLTYPE d3d12core_CreateDevice(d3d12core_interface *cor
     device_create_info.instance_create_info = NULL;
     device_create_info.device_extensions = device_extensions;
     device_create_info.device_extension_count = ARRAY_SIZE(device_extensions);
-    device_create_info.optional_device_extensions = NULL;
-    device_create_info.optional_device_extension_count = 0;
+    device_create_info.optional_device_extensions = optional_device_extensions;
+    device_create_info.optional_device_extension_count = ARRAY_SIZE(optional_device_extensions);
 
 #ifdef _WIN32
     device_create_info.vk_physical_device = d3d12_find_physical_device(instance, vulkan_vkGetInstanceProcAddr, &adapter_desc);
@@ -370,10 +402,20 @@ HRESULT STDMETHODCALLTYPE d3d12core_SerializeVersionedRootSignature(d3d12core_in
 HRESULT STDMETHODCALLTYPE d3d12core_GetDebugInterface(d3d12core_interface *core,
         REFIID iid, void** debug)
 {
+    ID3D12DeviceRemovedExtendedDataSettings *dred_settings;
+    HRESULT hr;
+
     TRACE("iid %s, debug %p.\n", debugstr_guid(iid), debug);
 
     if (debug)
         *debug = NULL;
+
+    if (!memcmp(iid, &IID_ID3D12DeviceRemovedExtendedDataSettings, sizeof(*iid)))
+    {
+        hr = d3d12_dred_settings_create(&dred_settings);
+        *debug = dred_settings;
+        return hr;
+    }
 
     WARN("Returning DXGI_ERROR_SDK_COMPONENT_MISSING.\n");
     return DXGI_ERROR_SDK_COMPONENT_MISSING;

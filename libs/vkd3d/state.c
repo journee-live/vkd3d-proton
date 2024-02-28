@@ -1568,7 +1568,8 @@ HRESULT d3d12_root_signature_create_empty(struct d3d12_device *device,
 
     /* For pipeline libraries, (and later DXR to some degree), we need a way to
      * compare root signature objects. */
-    object->compatibility_hash = 0;
+    object->pso_compatibility_hash = 0;
+    object->layout_compatibility_hash = 0;
 
     if (FAILED(hr))
     {
@@ -1597,7 +1598,7 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
 
     if (raw_payload)
     {
-        if ((ret = vkd3d_parse_root_signature_v_1_2_from_raw_payload(&dxbc, &root_signature_desc.vkd3d,
+        if ((ret = vkd3d_shader_parse_root_signature_v_1_2_from_raw_payload(&dxbc, &root_signature_desc.vkd3d,
                 &compatibility_hash)))
         {
             WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
@@ -1606,7 +1607,7 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
     }
     else
     {
-        if ((ret = vkd3d_parse_root_signature_v_1_2(&dxbc, &root_signature_desc.vkd3d, &compatibility_hash)) < 0)
+        if ((ret = vkd3d_shader_parse_root_signature_v_1_2(&dxbc, &root_signature_desc.vkd3d, &compatibility_hash)) < 0)
         {
             WARN("Failed to parse root signature, vkd3d result %d.\n", ret);
             return hresult_from_vkd3d_result(ret);
@@ -1623,7 +1624,9 @@ static HRESULT d3d12_root_signature_create_from_blob(struct d3d12_device *device
 
     /* For pipeline libraries, (and later DXR to some degree), we need a way to
      * compare root signature objects. */
-    object->compatibility_hash = compatibility_hash;
+    object->pso_compatibility_hash = compatibility_hash;
+    object->layout_compatibility_hash = vkd3d_root_signature_v_1_2_compute_layout_compat_hash(
+            &root_signature_desc.vkd3d.v_1_2);
 
     vkd3d_shader_free_root_signature(&root_signature_desc.vkd3d);
     if (FAILED(hr))
@@ -2882,7 +2885,9 @@ static HRESULT vkd3d_create_compute_pipeline(struct d3d12_pipeline_state *state,
     VK_CALL(vkDestroyShaderModule(device->vk_device, pipeline_info.stage.module, NULL));
     if (vr < 0)
     {
-        WARN("Failed to create Vulkan compute pipeline, hr %#x.", hr);
+        ERR("Failed to create Vulkan compute pipeline, hr %#x.", hr);
+        ERR("  Root signature: %"PRIx64"\n", state->root_signature->pso_compatibility_hash);
+        ERR("  Shader: %"PRIx64".\n", state->compute.code.meta.hash);
         return hresult_from_vk_result(vr);
     }
 
@@ -3867,7 +3872,7 @@ VkPipeline vkd3d_fragment_output_pipeline_create(struct d3d12_device *device,
     if ((vr = VK_CALL(vkCreateGraphicsPipelines(device->vk_device,
             VK_NULL_HANDLE, 1, &create_info, NULL, &vk_pipeline))))
     {
-        ERR("Failed to create vertex input pipeline, vr %d.\n", vr);
+        ERR("Failed to create fragment output pipeline, vr %d.\n", vr);
         return VK_NULL_HANDLE;
     }
 
@@ -4166,6 +4171,11 @@ static void d3d12_pipeline_state_graphics_handle_meta(struct d3d12_pipeline_stat
                 graphics->stages[i].stage == VK_SHADER_STAGE_GEOMETRY_BIT ||
                 graphics->stages[i].stage == VK_SHADER_STAGE_MESH_BIT_EXT)
             geometry_meta = graphics->code[i].meta.flags;
+
+        /* Need to disable AToC if the fragment shader exports sample mask */
+        if (graphics->stages[i].stage == VK_SHADER_STAGE_FRAGMENT_BIT &&
+                (graphics->code[i].meta.flags & VKD3D_SHADER_META_FLAG_EXPORTS_SAMPLE_MASK))
+            graphics->ms_desc.alphaToCoverageEnable = VK_FALSE;
     }
 
     if ((geometry_meta & VKD3D_SHADER_META_FLAG_EMITS_TRIANGLES) &&
@@ -4934,7 +4944,7 @@ HRESULT d3d12_pipeline_state_create(struct d3d12_device *device, VkPipelineBindP
 
     vkd3d_pipeline_cache_compat_from_state_desc(&object->pipeline_cache_compat, desc);
     if (object->root_signature)
-        object->pipeline_cache_compat.root_signature_compat_hash = object->root_signature->compatibility_hash;
+        object->pipeline_cache_compat.root_signature_compat_hash = object->root_signature->pso_compatibility_hash;
 
     desc_cached_pso = &desc->cached_pso;
 
@@ -5165,6 +5175,106 @@ static bool d3d12_pipeline_state_put_pipeline_to_cache(struct d3d12_pipeline_sta
     return compiled_pipeline;
 }
 
+static void d3d12_pipeline_state_log_graphics_state(const struct d3d12_pipeline_state *state)
+{
+    const struct d3d12_graphics_pipeline_state *graphics = &state->graphics;
+    unsigned int i, j;
+    uint32_t divisor;
+
+    ERR("Root signature: %"PRIx64"\n", state->root_signature->pso_compatibility_hash);
+
+    for (i = 0; i < graphics->stage_count; i++)
+        ERR("Shader %#x: %"PRIx64"\n", graphics->stages[i].stage, graphics->code[i].meta.hash);
+
+    if (graphics->stage_flags & VK_SHADER_STAGE_VERTEX_BIT)
+    {
+        ERR("Topology: %u (patch vertex count: %u)\n", graphics->primitive_topology_type, graphics->patch_vertex_count);
+        ERR("Vertex attributes: %u\n", graphics->attribute_count);
+        for (i = 0; i < graphics->attribute_count; i++)
+        {
+            const VkVertexInputAttributeDescription *attr = &graphics->attributes[i];
+            ERR("  %u: binding %u, format %u, location %u, offset %u\n", attr->binding, attr->format, attr->location, attr->offset);
+        }
+
+        ERR("Vertex bindings: %u.\n", graphics->attribute_binding_count);
+        for (i = 0; i < graphics->attribute_binding_count; i++)
+        {
+            const VkVertexInputBindingDescription *binding = &graphics->attribute_bindings[i];
+
+            divisor = 1u;
+
+            for (j = 0; j < graphics->instance_divisor_count; j++)
+            {
+                if (graphics->instance_divisors[j].binding == binding->binding)
+                    divisor = graphics->instance_divisors[j].divisor;
+            }
+
+            ERR("  %u: binding %u, input rate %u, stride %u, divisor %u\n", binding->binding, binding->inputRate, binding->stride, divisor);
+        }
+    }
+
+    if (graphics->cached_desc.xfb_info)
+    {
+        ERR("XFB (stage %u):\n", graphics->cached_desc.xfb_stage);
+
+        for (i = 0; i < graphics->cached_desc.xfb_info->element_count; i++)
+        {
+            const struct vkd3d_shader_transform_feedback_element *elem = &graphics->cached_desc.xfb_info->elements[i];
+
+            ERR("  Element %u: stream %u, semantic %s%u, components %#x, output %u\n", i,
+                    elem->stream_index, elem->semantic_name, elem->semantic_index,
+                    ((1u << elem->component_count) - 1u) << elem->component_index,
+                    elem->output_slot);
+        }
+
+        for (i = 0; i < graphics->cached_desc.xfb_info->buffer_stride_count; i++)
+            ERR("  Buffer %u: stride %u\n", i, graphics->cached_desc.xfb_info->buffer_strides[i]);
+    }
+
+    if (graphics->rt_count)
+    {
+        ERR("RTVs: %u\n", graphics->rt_count);
+
+        for (i = 0; i < graphics->rt_count; i++)
+        {
+            const VkPipelineColorBlendAttachmentState *blend = &graphics->blend_attachments[i];
+
+            ERR("  %u: %u (blend enable %u, write mask %#x)\n", i, graphics->rtv_formats[i],
+                    blend->blendEnable, blend->colorWriteMask);
+        }
+    }
+
+    if (graphics->dsv_format)
+    {
+        ERR("DSV: %u\n", graphics->dsv_format);
+        ERR("  Depth test: %u (write: %u)\n", graphics->ds_desc.depthTestEnable, graphics->ds_desc.depthWriteEnable);
+        ERR("  Depth bounds test: %u\n", graphics->ds_desc.depthBoundsTestEnable);
+
+        if (graphics->dsv_format->vk_aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT)
+        {
+            ERR("  Stencil test: %u (write: %u)\n", graphics->ds_desc.stencilTestEnable, graphics->ds_desc.stencilTestEnable &&
+                    (graphics->ds_desc.front.writeMask || graphics->ds_desc.back.writeMask));
+        }
+    }
+
+    ERR("Logic op enabled: %u (logic op: %u)\n",
+            graphics->blend_desc.logicOpEnable, graphics->blend_desc.logicOp);
+
+    ERR("Sample count: %u (mask: %#x, sample shading %u, alpha to coverage %u)\n",
+            graphics->ms_desc.rasterizationSamples, graphics->sample_mask,
+            graphics->ms_desc.sampleShadingEnable, graphics->ms_desc.alphaToCoverageEnable);
+
+    if (!graphics->rs_desc.rasterizerDiscardEnable)
+    {
+        ERR("Rasterizer state:\n");
+        ERR("  Polygon mode: %u\n", graphics->rs_desc.polygonMode);
+        ERR("  Line mode: %u (width: %f)\n", graphics->rs_line_info.lineRasterizationMode, graphics->rs_desc.lineWidth);
+        ERR("  Conservative: %u\n", graphics->rs_conservative_info.conservativeRasterizationMode);
+    }
+
+    ERR("Dynamic state: %#x (explicit: %#x)\n", graphics->pipeline_dynamic_states, graphics->explicit_dynamic_states);
+}
+
 static VkResult d3d12_pipeline_state_link_pipeline_variant(struct d3d12_pipeline_state *state,
         const struct vkd3d_pipeline_key *key, const struct vkd3d_format *dsv_format, VkPipelineCache vk_cache,
         uint32_t dynamic_state_flags, VkPipeline *vk_pipeline)
@@ -5219,7 +5329,10 @@ static VkResult d3d12_pipeline_state_link_pipeline_variant(struct d3d12_pipeline
             vk_cache, 1, &create_info, NULL, vk_pipeline));
 
     if (vr != VK_SUCCESS && vr != VK_PIPELINE_COMPILE_REQUIRED)
-        ERR("Failed to create link pipeline, vr %d.\n", vr);
+    {
+        ERR("Failed to link pipeline variant, vr %d.\n", vr);
+        d3d12_pipeline_state_log_graphics_state(state);
+    }
 
     return vr;
 }
@@ -5434,7 +5547,9 @@ VkPipeline d3d12_pipeline_state_create_pipeline_variant(struct d3d12_pipeline_st
 
     if (vr < 0)
     {
-        WARN("Failed to create Vulkan graphics pipeline, vr %d.\n", vr);
+        ERR("Failed to create Vulkan graphics pipeline, vr %d.\n", vr);
+        d3d12_pipeline_state_log_graphics_state(state);
+
         vk_pipeline = VK_NULL_HANDLE;
         goto err;
     }
